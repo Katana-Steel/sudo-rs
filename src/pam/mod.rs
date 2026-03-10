@@ -31,7 +31,7 @@ unsafe extern "C" {}
 #[cfg(target_os = "freebsd")]
 const PAM_DATA_SILENT: std::ffi::c_int = 0;
 
-pub use converse::CLIConverser;
+pub use converse::{CLIConverser, PasswordFeedback};
 
 pub struct PamContext {
     data_ptr: *mut ConverserData<CLIConverser>,
@@ -58,7 +58,7 @@ impl PamContext {
         use_stdin: bool,
         bell: bool,
         no_interact: bool,
-        password_feedback: bool,
+        password_feedback: PasswordFeedback,
         password_timeout: Option<Duration>,
         target_user: Option<&str>,
     ) -> PamResult<PamContext> {

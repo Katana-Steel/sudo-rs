@@ -92,6 +92,18 @@ fn handle_message<C: Converser>(
     }
 }
 
+/// Controls the style of visual feedback shown during password entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PasswordFeedback {
+    /// No visual feedback; echo is disabled entirely.
+    Disabled,
+    /// One '*' character per keystroke (traditional pwfeedback).
+    Bullets,
+    /// A fixed-width randomized display that never reveals input length.
+    /// The value specifies the display width in characters.
+    FixedWidth(usize),
+}
+
 /// A converser that uses stdin/stdout/stderr to display messages and to request
 /// input from the user.
 pub struct CLIConverser {
@@ -99,7 +111,7 @@ pub struct CLIConverser {
     pub(super) use_askpass: bool,
     pub(super) use_stdin: bool,
     pub(super) bell: Cell<bool>,
-    pub(super) password_feedback: bool,
+    pub(super) password_feedback: PasswordFeedback,
     pub(super) password_timeout: Option<Duration>,
 }
 
@@ -160,15 +172,12 @@ impl Converser for CLIConverser {
 
     fn handle_hidden_prompt(&self, msg: &str) -> PamResult<PamBuffer> {
         let (mut tty, _guard) = self.open()?;
-        tty.read_input(
-            msg,
-            self.password_timeout,
-            if self.password_feedback {
-                Hidden::WithFeedback(())
-            } else {
-                Hidden::Yes(())
-            },
-        )
+        let hidden = match self.password_feedback {
+            PasswordFeedback::Bullets => Hidden::WithFeedback(()),
+            PasswordFeedback::FixedWidth(w) => Hidden::WithFixedFeedback((), w),
+            PasswordFeedback::Disabled => Hidden::Yes(()),
+        };
+        tty.read_input(msg, self.password_timeout, hidden)
     }
 
     fn handle_error(&self, msg: &str) -> PamResult<()> {

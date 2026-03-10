@@ -394,6 +394,37 @@ fn default_set_test() {
 }
 
 #[test]
+fn default_pwfeedback_width_test() {
+    // pwfeedback_width set: should produce FixedWidth
+    let (mut sudoers, _) = analyze(
+        Path::new("/etc/fakesudoers"),
+        sudoer!["Defaults pwfeedback_width = 40"],
+    );
+    sudoers.specify_host_user_runas(
+        &system::Hostname::fake("host"),
+        &Named("user"),
+        Some(&Named("root")),
+    );
+    assert_eq!(sudoers.settings.pwfeedback_width(), 40);
+
+    // pwfeedback_width=0 with pwfeedback on: should fall back to Bullets
+    let (mut sudoers, _) = analyze(
+        Path::new("/etc/fakesudoers"),
+        sudoer!["Defaults pwfeedback_width = 0"],
+    );
+    sudoers.specify_host_user_runas(
+        &system::Hostname::fake("host"),
+        &Named("user"),
+        Some(&Named("root")),
+    );
+    assert_eq!(sudoers.settings.pwfeedback_width(), 0);
+    assert!(sudoers.settings.pwfeedback());
+
+    // out of range: should fail to parse
+    assert!(parse_string::<Sudo>("Defaults pwfeedback_width = 101").is_err());
+}
+
+#[test]
 fn default_multi_test() {
     let (mut sudoers, _) = analyze(
         Path::new("/etc/fakesudoers"),

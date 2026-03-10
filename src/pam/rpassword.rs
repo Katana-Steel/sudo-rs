@@ -96,6 +96,55 @@ pub(super) enum Hidden<T> {
     No,
     Yes(T),
     WithFeedback(T),
+    /// Fixed-width randomized feedback. The `usize` specifies the display width.
+    WithFixedFeedback(T, usize),
+}
+
+/// Picks a random feedback character with weighted probabilities:
+/// '*' 60%, '#' 25%, '@' 10%, '&' 5%
+fn random_feedback_char() -> u8 {
+    // Use a simple PRNG seeded from the stack pointer to avoid pulling in a
+    // dependency on the `rand` crate. This is feedback decoration, not
+    // cryptography, so quality requirements are low.
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static STATE: AtomicU32 = AtomicU32::new(0);
+
+    // Seed lazily from the system clock
+    let mut s = STATE.load(Ordering::Relaxed);
+    if s == 0 {
+        s = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(12345);
+    }
+    // xorshift32
+    s ^= s << 13;
+    s ^= s >> 17;
+    s ^= s << 5;
+    STATE.store(s, Ordering::Relaxed);
+
+    // Using % 128 (power of 2) eliminates modulo bias entirely.
+    // Gaps at 85 and 110 intentionally fall through to '&'.
+    #[allow(non_contiguous_range_endpoints)]
+    match s % 128 {
+        0..85 => b'*',
+        86..110 => b'@',
+        111..125 => b'#',
+        _ => b'&',
+    }
+}
+
+/// Writes `width` random characters to `sink`.
+fn write_fixed_feedback(sink: &mut dyn io::Write, width: usize) {
+    for _ in 0..width {
+        let _ = sink.write(&[random_feedback_char()]);
+    }
+}
+
+/// Erases the fixed feedback region and rewrites it with new random characters.
+fn update_fixed_feedback(sink: &mut dyn io::Write, width: usize) {
+    erase_feedback(sink, width);
+    write_fixed_feedback(sink, width);
 }
 
 /// Prompt for a password while optionally showing feedback to the user.
@@ -114,6 +163,9 @@ fn prompt_password(
             Hidden::No => Hidden::No,
             Hidden::Yes(()) => Hidden::Yes(HiddenInput::new(source)?),
             Hidden::WithFeedback(()) => Hidden::WithFeedback(HiddenInput::new(source)?),
+            Hidden::WithFixedFeedback((), width) => {
+                Hidden::WithFixedFeedback(HiddenInput::new(source)?, width)
+            }
         };
         let mut reader = TimeoutRead::new(source, timeout);
 
@@ -173,57 +225,117 @@ fn last_char_size(slice: &[u8]) -> usize {
     }
 }
 
+/// The kind of visual feedback being displayed during password entry.
+enum FeedbackMode {
+    /// No feedback at all (echo disabled, nothing displayed).
+    None,
+    /// Per-character bullet feedback ('*' per character typed).
+    Bullets,
+    /// Fixed-width randomized feedback that never reveals input length.
+    FixedWidth,
+}
+
+/// Manages all forms of visual feedback during password entry.
+struct Feedback<'a> {
+    mode: FeedbackMode,
+    /// Number of visible bullet characters (only used in Bullets mode).
+    bullet_len: usize,
+    /// The display width for fixed-width feedback.
+    fixed_width: usize,
+    /// Whether fixed-width feedback is currently displayed on screen.
+    fixed_displayed: bool,
+    sink: &'a mut dyn io::Write,
+}
+
+impl Feedback<'_> {
+    fn push(&mut self) {
+        match self.mode {
+            FeedbackMode::Bullets => {
+                let _ = self.sink.write(b"*");
+                self.bullet_len += 1;
+            }
+            FeedbackMode::FixedWidth => {
+                if self.fixed_displayed {
+                    update_fixed_feedback(self.sink, self.fixed_width);
+                } else {
+                    write_fixed_feedback(self.sink, self.fixed_width);
+                    self.fixed_displayed = true;
+                }
+            }
+            FeedbackMode::None => {}
+        }
+    }
+
+    fn pop(&mut self) {
+        match self.mode {
+            FeedbackMode::Bullets if self.bullet_len > 0 => {
+                erase_feedback(self.sink, 1);
+                self.bullet_len -= 1;
+            }
+            FeedbackMode::FixedWidth if self.fixed_displayed => {
+                update_fixed_feedback(self.sink, self.fixed_width);
+            }
+            _ => {}
+        }
+    }
+
+    fn clear(&mut self) {
+        match self.mode {
+            FeedbackMode::Bullets => {
+                erase_feedback(self.sink, self.bullet_len);
+                self.bullet_len = 0;
+            }
+            FeedbackMode::FixedWidth if self.fixed_displayed => {
+                erase_feedback(self.sink, self.fixed_width);
+                self.fixed_displayed = false;
+            }
+            _ => {}
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        !matches!(self.mode, FeedbackMode::None)
+    }
+
+    fn disable(&mut self) {
+        self.clear();
+        self.mode = FeedbackMode::None;
+    }
+}
+
+// Ensure we erase the password feedback no matter how we exit read_unbuffered
+impl Drop for Feedback<'_> {
+    fn drop(&mut self) {
+        self.clear();
+        let _ = self.sink.write(b"\n");
+    }
+}
+
 /// Reads a password from the given file descriptor while optionally showing feedback to the user.
 fn read_unbuffered(
     source: &mut TimeoutRead<'_>,
     sink: &mut dyn io::Write,
     hide_input: &Hidden<HiddenInput>,
 ) -> PamResult<PamBuffer> {
-    struct Bullets<'a> {
-        visible_len: Option<usize>,
-        sink: &'a mut dyn io::Write,
-    }
+    let (mode, fixed_width) = match hide_input {
+        Hidden::WithFeedback(_) => (FeedbackMode::Bullets, 0),
+        Hidden::WithFixedFeedback(_, width) => (FeedbackMode::FixedWidth, *width),
+        _ => (FeedbackMode::None, 0),
+    };
 
-    const BULLET: &[u8] = b"*";
-
-    impl Bullets<'_> {
-        fn push(&mut self) {
-            if let Some(ref mut len) = self.visible_len {
-                let _ = self.sink.write(BULLET);
-                *len += 1;
-            }
-        }
-
-        fn pop(&mut self) {
-            match self.visible_len {
-                Some(ref mut len) if *len > 0 => {
-                    erase_feedback(self.sink, 1);
-                    *len -= 1;
-                }
-                _ => {}
-            }
-        }
-
-        fn clear(&mut self) {
-            if let Some(ref mut len) = self.visible_len {
-                erase_feedback(self.sink, *len);
-                *len = 0;
-            }
-        }
-    }
-
-    // Ensure we erase the password feedback no matter how we exit read_unbuffered
-    impl Drop for Bullets<'_> {
-        fn drop(&mut self) {
-            self.clear();
-            let _ = self.sink.write(b"\n");
-        }
-    }
-
-    let mut feedback = Bullets {
-        visible_len: matches!(hide_input, Hidden::WithFeedback(_)).then_some(0),
+    let mut feedback = Feedback {
+        mode,
+        bullet_len: 0,
+        fixed_width,
+        fixed_displayed: false,
         sink,
     };
+
+    // Show initial fixed-width feedback before any input
+    if let Hidden::WithFixedFeedback(_, width) = hide_input {
+        write_fixed_feedback(feedback.sink, *width);
+        feedback.fixed_displayed = true;
+    }
 
     let mut password = PamBuffer::default();
     let mut pw_len = 0;
@@ -240,7 +352,10 @@ fn read_unbuffered(
             return Ok(password);
         }
 
-        if let Hidden::Yes(input) | Hidden::WithFeedback(input) = hide_input {
+        if let Hidden::Yes(input)
+        | Hidden::WithFeedback(input)
+        | Hidden::WithFixedFeedback(input, _) = hide_input
+        {
             if read_byte == input.term_orig.c_cc[VEOF] {
                 break;
             }
@@ -260,9 +375,8 @@ fn read_unbuffered(
                 continue;
             }
 
-            if read_byte == b'\t' && feedback.visible_len.is_some() {
-                feedback.clear();
-                feedback.visible_len = None;
+            if read_byte == b'\t' && feedback.is_active() {
+                feedback.disable();
                 let _ = feedback.sink.write(b"(no echo)");
                 continue;
             }

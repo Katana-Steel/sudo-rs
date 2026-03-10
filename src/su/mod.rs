@@ -2,7 +2,7 @@
 
 use crate::common::error::Error;
 use crate::log::user_warn;
-use crate::pam::{PamContext, PamError, PamErrorType};
+use crate::pam::{PamContext, PamError, PamErrorType, PasswordFeedback};
 use crate::system::term::current_tty_name;
 
 use std::env;
@@ -35,7 +35,7 @@ fn authenticate(requesting_user: &str, user: &str, login: bool) -> Result<PamCon
         use_stdin,
         false,
         false,
-        false,
+        PasswordFeedback::Disabled,
         None,
         Some(user),
     )?;

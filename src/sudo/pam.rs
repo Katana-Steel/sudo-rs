@@ -4,7 +4,7 @@ use std::time::Duration;
 use crate::common::context::LaunchType;
 use crate::common::error::Error;
 use crate::log::{dev_info, user_warn};
-use crate::pam::{PamContext, PamError, PamErrorType, PamResult};
+use crate::pam::{PamContext, PamError, PamErrorType, PamResult, PasswordFeedback};
 use crate::system::term::current_tty_name;
 
 pub(super) struct InitPamArgs<'a> {
@@ -13,7 +13,7 @@ pub(super) struct InitPamArgs<'a> {
     pub(super) use_stdin: bool,
     pub(super) bell: bool,
     pub(super) non_interactive: bool,
-    pub(super) password_feedback: bool,
+    pub(super) password_feedback: PasswordFeedback,
     pub(super) password_timeout: Option<Duration>,
     pub(super) auth_prompt: Option<String>,
     pub(super) auth_user: &'a str,

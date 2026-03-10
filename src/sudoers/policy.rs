@@ -9,6 +9,7 @@ use crate::common::{
     HARDENED_ENUM_VALUE_0, HARDENED_ENUM_VALUE_1, HARDENED_ENUM_VALUE_2, SudoPath,
 };
 use crate::exec::Umask;
+use crate::pam::PasswordFeedback;
 use crate::sudoers::ast::{ExecControl, Tag};
 use crate::system::{Hostname, User};
 use std::collections::HashSet;
@@ -30,7 +31,7 @@ pub struct Authentication {
     pub credential: AuthenticatingUser,
     pub allowed_attempts: u16,
     pub prior_validity: Duration,
-    pub pwfeedback: bool,
+    pub pwfeedback: PasswordFeedback,
     pub password_timeout: Option<Duration>,
     pub noninteractive_auth: bool,
 }
@@ -41,7 +42,11 @@ impl super::Settings {
             must_authenticate: tag.needs_passwd(),
             allowed_attempts: self.passwd_tries().try_into().unwrap(),
             prior_validity: Duration::from_secs(self.timestamp_timeout()),
-            pwfeedback: self.pwfeedback(),
+            pwfeedback: match self.pwfeedback_width() {
+                0 if self.pwfeedback() => PasswordFeedback::Bullets,
+                0 => PasswordFeedback::Disabled,
+                width => PasswordFeedback::FixedWidth(width as usize),
+            },
             password_timeout: match self.passwd_timeout() {
                 0 => None,
                 timeout => Some(Duration::from_secs(timeout)),
@@ -198,7 +203,7 @@ mod test {
                 allowed_attempts: 3,
                 prior_validity: Duration::from_secs(15 * 60),
                 credential: AuthenticatingUser::InvokingUser,
-                pwfeedback: true,
+                pwfeedback: PasswordFeedback::Bullets,
                 noninteractive_auth: false,
                 password_timeout: Some(Duration::from_secs(300)),
             },
@@ -216,7 +221,7 @@ mod test {
                 allowed_attempts: 3,
                 prior_validity: Duration::from_secs(15 * 60),
                 credential: AuthenticatingUser::InvokingUser,
-                pwfeedback: true,
+                pwfeedback: PasswordFeedback::Bullets,
                 noninteractive_auth: false,
                 password_timeout: Some(Duration::from_secs(300)),
             },
